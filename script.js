@@ -1355,9 +1355,18 @@ function renderGrid() {
     }
     grid.innerHTML = html;
 
+    grid.innerHTML = html;
+
     // Attach events
     $$('.element-cell').forEach(cell => {
-        cell.addEventListener('click', () => showDetails(parseInt(cell.dataset.id)));
+        cell.addEventListener('click', () => {
+            const id = parseInt(cell.dataset.id);
+            if(window.isAlchemyLabOpen) {
+                addToAlchemy(id);
+            } else {
+                showDetails(id);
+            }
+        });
     });
 }
 
@@ -1414,82 +1423,143 @@ function showDetails(id) {
         <div class="data-item"><div class="data-lbl">Period</div><div class="data-val">${el.period > 7 ? el.period-2 : el.period}</div></div>
         <div class="desc-box">
             ${escapeHtml(el.desc)}
-            <h4 style="margin-top:20px;text-align:center;color:var(--accent);">Live Bohr Model</h4>
-            <div style="text-align:center;"><canvas id="bohrCanvas" width="250" height="250" style="margin:10px auto;border-radius:50%;background:rgba(0,0,0,0.2);box-shadow:inset 0 0 20px rgba(0,0,0,0.5);"></canvas></div>
         </div>
     </div>
     `;
-    content.innerHTML = html;
+    const infoView = document.getElementById('infoView');
+    if(infoView) infoView.innerHTML = html;
+    
+    // Auto-switch to 3D tab if requested by user feedback
+    document.getElementById('tab3D')?.click();
     panel.classList.add('open');
-    drawBohrModel(el);
+    
+    document.getElementById('closePanelBtn')?.addEventListener('click', () => {
+        panel.classList.remove('open');
+    });
+
+    if (window.current3DModel) {
+        cancelAnimationFrame(window.current3DModel.req);
+        if(window.current3DModel.renderer) window.current3DModel.renderer.dispose();
+    }
+    draw3DAtomicModel(el);
 }
 
-// Draw dynamic Bohr Model
-function drawBohrModel(el) {
-    const cvs = document.getElementById('bohrCanvas');
-    if(!cvs) return;
-    const ctx = cvs.getContext('2d');
-    const w = cvs.width, h = cvs.height;
-    const cx = w/2, cy = h/2;
+// Draw interactive 3D Atomic Model using Three.js
+function draw3DAtomicModel(el) {
+    const container = document.getElementById('threeContainer');
+    if(!container) return;
+    container.innerHTML = ''; // clear old
     
-    // Calculate electrons per shell based on atomic number
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, w/h, 0.1, 1000);
+    camera.position.z = 80;
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+    
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    
+    const group = new THREE.Group();
+    scene.add(group);
+    
+    // Ambient light
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const pointLight = new THREE.PointLight(0xffffff, 1);
+    pointLight.position.set(20, 20, 20);
+    scene.add(pointLight);
+
+    // Nucleus
+    const nucleusGeo = new THREE.SphereGeometry(3 + Math.min(el.n * 0.05, 5), 32, 32);
+    const catColor = CATEGORIES[el.c] ? CATEGORIES[el.c].color : '#6366f1';
+    const nucleusMat = new THREE.MeshPhysicalMaterial({
+        color: new THREE.Color(catColor),
+        emissive: new THREE.Color(catColor),
+        emissiveIntensity: 0.3,
+        roughness: 0.2,
+        metalness: 0.8,
+        clearcoat: 1.0,
+    });
+    const nucleus = new THREE.Mesh(nucleusGeo, nucleusMat);
+    group.add(nucleus);
+    
+    // Calculate electrons per shell
     let z = el.n;
     const maxCapacity = [2, 8, 18, 32, 32, 18, 8];
     const shells = [];
     for(let cap of maxCapacity) {
         if(z <= 0) break;
         let e = Math.min(z, cap);
-        // Correcting valence anomalies for simplicity (Bohr is an approximation)
         if(z > cap && e === cap && cap >= 18 && z - cap < 8) {
-            e = cap - Math.min(z-cap+8, 10); // rough fallback
+            e = cap - Math.min(z-cap+8, 10);
         }
         shells.push(e);
         z -= e;
     }
     
-    // Animate
-    let t = 0;
-    function render() {
-        if(!cvs.isConnected) return;
-        ctx.clearRect(0,0,w,h);
+    const shellObjects = [];
+    const electronObjects = [];
+    
+    const electronGeo = new THREE.SphereGeometry(0.8, 16, 16);
+    const electronMat = new THREE.MeshBasicMaterial({ color: 0x60a5fa });
+
+    shells.forEach((electrons, sIdx) => {
+        const r = 12 + sIdx * 8;
         
-        // Nucleus
-        ctx.beginPath();
-        const nGrad = ctx.createRadialGradient(cx, cy, 2, cx, cy, 15);
-        nGrad.addColorStop(0, '#fff');
-        nGrad.addColorStop(1, 'var(--accent)');
-        ctx.fillStyle = nGrad;
-        ctx.arc(cx, cy, 15, 0, Math.PI*2);
-        ctx.fill();
-        ctx.fillStyle = '#000'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(el.s, cx, cy+4);
+        // Orbital ring
+        const ringGeo = new THREE.TorusGeometry(r, 0.1, 8, 64);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.15 });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
         
-        // Shells
-        const shellDist = (w/2 - 20) / shells.length;
-        shells.forEach((electrons, sIdx) => {
-            const r = 25 + sIdx * shellDist;
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-            ctx.lineWidth = 1.5;
-            ctx.arc(cx, cy, r, 0, Math.PI*2);
-            ctx.stroke();
-            
-            // Electrons
-            for(let e=0; e<electrons; e++) {
-                const angle = (Math.PI*2 / electrons) * e + (t * (sIdx % 2===0 ? 1 : -1) * (0.02 - sIdx*0.003));
-                const ex = cx + Math.cos(angle) * r;
-                const ey = cy + Math.sin(angle) * r;
-                ctx.beginPath();
-                ctx.fillStyle = '#6366f1';
-                ctx.arc(ex, ey, 3, 0, Math.PI*2);
-                ctx.fill();
-                ctx.shadowBlur = 5; ctx.shadowColor = '#6366f1'; ctx.fill(); ctx.shadowBlur = 0;
-            }
+        // Random tilt for 3D feel
+        ring.rotation.x = (Math.random() - 0.5) * Math.PI;
+        ring.rotation.y = (Math.random() - 0.5) * Math.PI;
+        group.add(ring);
+        shellObjects.push({ ring, r, speed: 0.01 + Math.random() * 0.02 * (sIdx%2===0?1:-1) });
+        
+        // Electrons on this shell
+        for(let e=0; e<electrons; e++) {
+            const mesh = new THREE.Mesh(electronGeo, electronMat);
+            const angle = (Math.PI*2 / electrons) * e;
+            // position relative to ring
+            ring.add(mesh);
+            electronObjects.push({ mesh, angle, shellIdx: sIdx });
+        }
+    });
+
+    let reqId;
+    function animate() {
+        if(!container.isConnected) return;
+        reqId = requestAnimationFrame(animate);
+        
+        controls.update();
+        
+        // Rotate nucleus slowly
+        nucleus.rotation.y += 0.005;
+        nucleus.rotation.x += 0.002;
+        
+        // Rotate shells
+        shellObjects.forEach((shell) => {
+            shell.ring.rotation.z += shell.speed;
         });
-        t += 0.5;
-        requestAnimationFrame(render);
+        
+        // Position electrons correctly on the ring
+        electronObjects.forEach(e => {
+            const r = shellObjects[e.shellIdx].r;
+            e.mesh.position.set(Math.cos(e.angle) * r, Math.sin(e.angle) * r, 0);
+        });
+
+        renderer.render(scene, camera);
     }
-    render();
+    animate();
+    
+    window.current3DModel = { req: reqId, renderer };
 }
 
 
@@ -1776,102 +1846,145 @@ showDetails = function(id) {
     // ELEMENT COMBINING LAB
     // ═══════════════════════════════════════════════════
     const REACTIONS_DB = [
-        { reactants: [1,8], product: 'H₂O', name: 'Water', ratio: '2H₂ + O₂', conditions: 'Spark/flame', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [1,17], product: 'HCl', name: 'Hydrochloric acid', ratio: 'H₂ + Cl₂', conditions: 'UV light or heat', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [11,17], product: 'NaCl', name: 'Table salt', ratio: '2Na + Cl₂', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [6,8], product: 'CO₂', name: 'Carbon dioxide', ratio: 'C + O₂', conditions: 'Combustion (heat)', type: 'Combustion', bond: 'Covalent' },
-        { reactants: [26,8], product: 'Fe₂O₃', name: 'Iron(III) oxide (Rust)', ratio: '4Fe + 3O₂', conditions: 'Moisture + O₂', type: 'Oxidation', bond: 'Ionic' },
-        { reactants: [12,8], product: 'MgO', name: 'Magnesium oxide', ratio: '2Mg + O₂', conditions: 'Burning (bright flame)', type: 'Combustion', bond: 'Ionic' },
-        { reactants: [13,8], product: 'Al₂O₃', name: 'Aluminum oxide', ratio: '4Al + 3O₂', conditions: 'High temperature', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [7,1], product: 'NH₃', name: 'Ammonia', ratio: 'N₂ + 3H₂', conditions: 'Haber process (450°C, catalyst)', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [16,8], product: 'SO₂', name: 'Sulfur dioxide', ratio: 'S + O₂', conditions: 'Combustion', type: 'Combustion', bond: 'Covalent' },
-        { reactants: [20,6], product: 'CaCO₃', name: 'Calcium carbonate (Limestone)', ratio: 'Ca + C + 3O', conditions: 'Natural formation', type: 'Synthesis', bond: 'Ionic/Covalent' },
-        { reactants: [19,35], product: 'KBr', name: 'Potassium bromide', ratio: '2K + Br₂', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [14,8], product: 'SiO₂', name: 'Silicon dioxide (Quartz)', ratio: 'Si + O₂', conditions: 'High temperature', type: 'Synthesis', bond: 'Covalent' },
+        // Elemental molecules
+        { reactants: [1,1], product: 'H₂', name: 'Hydrogen Gas', ratio: 'H + H', conditions: 'Standard', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [8,8], product: 'O₂', name: 'Oxygen Gas', ratio: 'O + O', conditions: 'Standard', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [7,7], product: 'N₂', name: 'Nitrogen Gas', ratio: 'N + N', conditions: 'Standard', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [17,17], product: 'Cl₂', name: 'Chlorine Gas', ratio: 'Cl + Cl', conditions: 'Standard', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [6,6,6], product: 'C₃', name: 'Carbon cluster', ratio: '3C', conditions: 'Vacuum', type: 'Synthesis', bond: 'Covalent' },
+        
+        // Compounds
+        { reactants: [1,1,8], product: 'H₂O', name: 'Water', ratio: '2H + O', conditions: 'Spark/flame', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [1,17], product: 'HCl', name: 'Hydrochloric acid', ratio: 'H + Cl', conditions: 'UV light or heat', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [11,17], product: 'NaCl', name: 'Table salt', ratio: 'Na + Cl', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [6,8,8], product: 'CO₂', name: 'Carbon dioxide', ratio: 'C + 2O', conditions: 'Combustion (heat)', type: 'Combustion', bond: 'Covalent' },
+        { reactants: [26,26,8,8,8], product: 'Fe₂O₃', name: 'Iron(III) oxide (Rust)', ratio: '2Fe + 3O', conditions: 'Moisture + O₂', type: 'Oxidation', bond: 'Ionic' },
+        { reactants: [12,8], product: 'MgO', name: 'Magnesium oxide', ratio: 'Mg + O', conditions: 'Burning (bright flame)', type: 'Combustion', bond: 'Ionic' },
+        { reactants: [13,13,8,8,8], product: 'Al₂O₃', name: 'Aluminum oxide', ratio: '2Al + 3O', conditions: 'High temperature', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [7,1,1,1], product: 'NH₃', name: 'Ammonia', ratio: 'N + 3H', conditions: 'Haber process (450°C, catalyst)', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [16,8,8], product: 'SO₂', name: 'Sulfur dioxide', ratio: 'S + 2O', conditions: 'Combustion', type: 'Combustion', bond: 'Covalent' },
+        { reactants: [20,6,8,8,8], product: 'CaCO₃', name: 'Calcium carbonate (Limestone)', ratio: 'Ca + C + 3O', conditions: 'Natural formation', type: 'Synthesis', bond: 'Ionic/Covalent' },
+        { reactants: [19,35], product: 'KBr', name: 'Potassium bromide', ratio: 'K + Br', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [14,8,8], product: 'SiO₂', name: 'Silicon dioxide (Quartz)', ratio: 'Si + 2O', conditions: 'High temperature', type: 'Synthesis', bond: 'Covalent' },
         { reactants: [29,16], product: 'CuS', name: 'Copper sulfide', ratio: 'Cu + S', conditions: 'Heat', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [30,8], product: 'ZnO', name: 'Zinc oxide', ratio: '2Zn + O₂', conditions: 'Burning', type: 'Combustion', bond: 'Ionic' },
-        { reactants: [15,8], product: 'P₂O₅', name: 'Phosphorus pentoxide', ratio: '4P + 5O₂', conditions: 'Burning in air', type: 'Combustion', bond: 'Covalent' },
-        { reactants: [11,8], product: 'Na₂O', name: 'Sodium oxide', ratio: '4Na + O₂', conditions: 'Heating', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [3,7], product: 'Li₃N', name: 'Lithium nitride', ratio: '6Li + N₂', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [20,17], product: 'CaCl₂', name: 'Calcium chloride', ratio: 'Ca + Cl₂', conditions: 'Direct combination', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [1,16], product: 'H₂S', name: 'Hydrogen sulfide', ratio: 'H₂ + S', conditions: 'Heat', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [6,1], product: 'CH₄', name: 'Methane', ratio: 'C + 2H₂', conditions: 'High pressure/temp', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [47,16], product: 'Ag₂S', name: 'Silver sulfide (Tarnish)', ratio: '2Ag + S', conditions: 'Air exposure', type: 'Oxidation', bond: 'Ionic' },
-        { reactants: [22,17], product: 'TiCl₄', name: 'Titanium tetrachloride', ratio: 'Ti + 2Cl₂', conditions: 'High temperature', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [50,8], product: 'SnO₂', name: 'Tin dioxide', ratio: 'Sn + O₂', conditions: 'Heating in air', type: 'Combustion', bond: 'Ionic' },
+        { reactants: [30,8], product: 'ZnO', name: 'Zinc oxide', ratio: 'Zn + O', conditions: 'Burning', type: 'Combustion', bond: 'Ionic' },
+        { reactants: [15,15,8,8,8,8,8], product: 'P₂O₅', name: 'Phosphorus pentoxide', ratio: '2P + 5O', conditions: 'Burning in air', type: 'Combustion', bond: 'Covalent' },
+        { reactants: [11,11,8], product: 'Na₂O', name: 'Sodium oxide', ratio: '2Na + O', conditions: 'Heating', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [3,3,3,7], product: 'Li₃N', name: 'Lithium nitride', ratio: '3Li + N', conditions: 'Room temperature', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [20,17,17], product: 'CaCl₂', name: 'Calcium chloride', ratio: 'Ca + 2Cl', conditions: 'Direct combination', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [1,1,16], product: 'H₂S', name: 'Hydrogen sulfide', ratio: '2H + S', conditions: 'Heat', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [6,1,1,1,1], product: 'CH₄', name: 'Methane', ratio: 'C + 4H', conditions: 'High pressure/temp', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [47,47,16], product: 'Ag₂S', name: 'Silver sulfide (Tarnish)', ratio: '2Ag + S', conditions: 'Air exposure', type: 'Oxidation', bond: 'Ionic' },
+        { reactants: [22,17,17,17,17], product: 'TiCl₄', name: 'Titanium tetrachloride', ratio: 'Ti + 4Cl', conditions: 'High temperature', type: 'Synthesis', bond: 'Covalent' },
+        { reactants: [50,8,8], product: 'SnO₂', name: 'Tin dioxide', ratio: 'Sn + 2O', conditions: 'Heating in air', type: 'Combustion', bond: 'Ionic' },
         { reactants: [82,16], product: 'PbS', name: 'Lead sulfide (Galena)', ratio: 'Pb + S', conditions: 'Heat', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [19,8], product: 'K₂O', name: 'Potassium oxide', ratio: '4K + O₂', conditions: 'Burning', type: 'Combustion', bond: 'Ionic' },
-        { reactants: [56,8], product: 'BaO', name: 'Barium oxide', ratio: '2Ba + O₂', conditions: 'Heating', type: 'Synthesis', bond: 'Ionic' },
-        { reactants: [25,8], product: 'MnO₂', name: 'Manganese dioxide', ratio: 'Mn + O₂', conditions: 'Natural oxidation', type: 'Oxidation', bond: 'Ionic' },
-        { reactants: [24,8], product: 'Cr₂O₃', name: 'Chromium(III) oxide', ratio: '4Cr + 3O₂', conditions: 'High temperature', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [19,19,8], product: 'K₂O', name: 'Potassium oxide', ratio: '2K + O', conditions: 'Burning', type: 'Combustion', bond: 'Ionic' },
+        { reactants: [56,8], product: 'BaO', name: 'Barium oxide', ratio: 'Ba + O', conditions: 'Heating', type: 'Synthesis', bond: 'Ionic' },
+        { reactants: [25,8,8], product: 'MnO₂', name: 'Manganese dioxide', ratio: 'Mn + 2O', conditions: 'Natural oxidation', type: 'Oxidation', bond: 'Ionic' },
+        { reactants: [24,24,8,8,8], product: 'Cr₂O₃', name: 'Chromium(III) oxide', ratio: '2Cr + 3O', conditions: 'High temperature', type: 'Synthesis', bond: 'Ionic' },
         { reactants: [74,6], product: 'WC', name: 'Tungsten carbide', ratio: 'W + C', conditions: '1400-1600°C', type: 'Synthesis', bond: 'Covalent' },
-        { reactants: [28,8], product: 'NiO', name: 'Nickel oxide', ratio: '2Ni + O₂', conditions: 'Heating in air', type: 'Synthesis', bond: 'Ionic' }
+        { reactants: [28,8], product: 'NiO', name: 'Nickel oxide', ratio: 'Ni + O', conditions: 'Heating in air', type: 'Synthesis', bond: 'Ionic' }
     ];
     
-    window.findReactions = function(el1Num, el2Num) {
-        return REACTIONS_DB.filter(r => 
-            (r.reactants.includes(el1Num) && r.reactants.includes(el2Num))
-        );
+    // Support exact stoichiometric matching
+    window.findReactions = function(elNums) {
+        // Sort input for easy comparison
+        const sortedInput = [...elNums].sort((a,b)=>a-b);
+        return REACTIONS_DB.filter(r => {
+            const sortedReactants = [...r.reactants].sort((a,b)=>a-b);
+            if(sortedInput.length !== sortedReactants.length) return false;
+            return sortedInput.every((val, index) => val === sortedReactants[index]);
+        });
     };
 
-    // Combine elements UI — triggered from a "Combine" button
     window.openCombineLab = function() {
         let panel = document.getElementById('combineLab');
         if (!panel) {
             panel = document.createElement('div');
             panel.id = 'combineLab';
             panel.className = 'glass-card';
-            panel.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000; padding:1.5rem; max-width:600px; width:90%; max-height:80vh; overflow-y:auto; background:rgba(10,15,30,0.95); border:1px solid var(--accent); border-radius:16px;';
+            panel.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000; padding:1.5rem; max-width:700px; width:90%; max-height:80vh; overflow-y:auto; background:rgba(10,15,30,0.95); border:1px solid var(--accent); border-radius:16px; box-shadow:0 20px 40px rgba(0,0,0,0.5);';
             document.body.appendChild(panel);
         }
         
+        const optionsHtml = elements.map(e => `<option value="${e.n}">${e.n}. ${e.name} (${e.s})</option>`).join('');
+        
         panel.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-                <h3 style="margin:0; color:var(--accent);">⚗️ Element Combining Lab</h3>
-                <button onclick="document.getElementById('combineLab').remove()" style="background:none; border:none; color:#fff; font-size:1.2rem; cursor:pointer;">✕</button>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+                <h3 style="margin:0; color:var(--accent);">⚗️ Advanced Chemistry Combinator</h3>
+                <button onclick="document.getElementById('combineLab').remove()" style="background:none; border:none; color:#fff; font-size:1.5rem; cursor:pointer; line-height:1;">&times;</button>
             </div>
-            <div style="display:flex; gap:1rem; margin-bottom:1rem; flex-wrap:wrap;">
-                <select id="combineEl1" style="flex:1; min-width:120px; padding:0.5rem; background:rgba(0,0,0,0.3); color:#fff; border:1px solid rgba(255,255,255,0.15); border-radius:8px;">
-                    ${elements.map(e => `<option value="${e.n}">${e.n}. ${e.name} (${e.s})</option>`).join('')}
+            
+            <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:1rem;">Select up to 3 elements to simulate a chemical synthesis or reaction.</p>
+            
+            <div id="combineInputs" style="display:flex; gap:0.5rem; margin-bottom:1rem; flex-wrap:wrap; align-items:center;">
+                <select class="combineEl" style="flex:1; min-width:120px; padding:0.6rem; background:rgba(0,0,0,0.4); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; outline:none;">
+                    ${optionsHtml}
                 </select>
-                <span style="color:var(--accent); font-size:1.5rem; align-self:center;">+</span>
-                <select id="combineEl2" style="flex:1; min-width:120px; padding:0.5rem; background:rgba(0,0,0,0.3); color:#fff; border:1px solid rgba(255,255,255,0.15); border-radius:8px;">
+                <span style="color:var(--accent); font-size:1.5rem; font-weight:bold;">+</span>
+                <select class="combineEl" style="flex:1; min-width:120px; padding:0.6rem; background:rgba(0,0,0,0.4); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; outline:none;">
+                    <option value="0">-- None --</option>
                     ${elements.map(e => `<option value="${e.n}" ${e.n===8?'selected':''}>${e.n}. ${e.name} (${e.s})</option>`).join('')}
                 </select>
-                <button onclick="performCombine()" class="btn btn-primary" style="padding:0.5rem 1.2rem;">Combine</button>
+                <span style="color:var(--accent); font-size:1.5rem; font-weight:bold;">+</span>
+                <select class="combineEl" style="flex:1; min-width:120px; padding:0.6rem; background:rgba(0,0,0,0.4); color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px; outline:none;">
+                    <option value="0" selected>-- None --</option>
+                    ${optionsHtml}
+                </select>
             </div>
-            <div id="combineResults" style="min-height:80px;"></div>
+            <div style="text-align:center; margin-bottom:1.5rem;">
+                <button onclick="performCombine()" class="btn btn-primary" style="padding:0.6rem 2rem; font-size:1rem; border-radius:20px; background:linear-gradient(135deg, var(--c-alkali), var(--c-post-transition)); border:none; color:#fff; cursor:pointer; font-weight:600; box-shadow:0 4px 15px rgba(255,255,255,0.1);">🧪 Synthesize</button>
+            </div>
+            <div id="combineResults" style="min-height:100px;"></div>
         `;
     };
     
     window.performCombine = function() {
-        const el1 = parseInt(document.getElementById('combineEl1').value);
-        const el2 = parseInt(document.getElementById('combineEl2').value);
-        const results = findReactions(el1, el2);
+        const inputs = Array.from(document.querySelectorAll('.combineEl'))
+            .map(select => parseInt(select.value))
+            .filter(val => val > 0);
+            
+        // Unique sort
+        const elNums = [...new Set(inputs)].sort((a,b)=>a-b);
         const container = document.getElementById('combineResults');
         
-        const el1Data = elements.find(x => x.n === el1);
-        const el2Data = elements.find(x => x.n === el2);
+        if (elNums.length === 0) {
+             container.innerHTML = '<div style="text-align:center; color:var(--text-muted);">Please select at least one element.</div>';
+             return;
+        }
+
+        const elNames = elNums.map(num => {
+            const e = elements.find(x => x.n === num);
+            return e ? e.name : num;
+        });
+        
+        const results = findReactions(elNums);
         
         if (results.length === 0) {
-            container.innerHTML = `<div style="text-align:center; padding:2rem; color:var(--text-muted);">
-                <div style="font-size:2rem; margin-bottom:0.5rem;">🔬</div>
-                No known common reaction between <strong>${el1Data?.name || el1}</strong> and <strong>${el2Data?.name || el2}</strong>.<br>
-                <span style="font-size:0.8rem;">Try combining metals with non-metals, or check elements like H, O, C, Na, Cl.</span>
+            container.innerHTML = `<div style="text-align:center; padding:2rem; background:rgba(0,0,0,0.3); border-radius:12px; border:1px dashed var(--border);">
+                <div style="font-size:3rem; margin-bottom:1rem; filter:grayscale(100%);">💨</div>
+                <h4 style="color:var(--text-muted); font-size:1.1rem; margin-bottom:0.5rem;">Reaction Failed</h4>
+                <p style="color:var(--text-muted); font-size:0.85rem; max-width:80%; margin:0 auto;">
+                No known common stable compound directly forms from combining just <strong>${elNames.join(', ')}</strong> under normal conditions.
+                <br><br><span style="opacity:0.7;">Hint: Try common combinations like Hydrogen + Oxygen, Sodium + Chlorine, or Carbon + Oxygen.</span></p>
             </div>`;
             return;
         }
         
         container.innerHTML = results.map(r => `
-            <div style="background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.2); border-radius:10px; padding:1rem; margin-bottom:0.75rem;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-                    <h4 style="margin:0; color:#4ade80; font-size:1.1rem;">${r.product} — ${r.name}</h4>
-                    <span style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:rgba(99,102,241,0.15); color:var(--accent);">${r.type}</span>
+            <div style="background:linear-gradient(to right, rgba(99,102,241,0.1), rgba(0,0,0,0)); border-left:4px solid var(--accent); border-radius:8px; padding:1.25rem; margin-bottom:1rem; position:relative; overflow:hidden;">
+                <div style="position:absolute; right:-20px; top:-20px; font-size:8rem; opacity:0.05; pointer-events:none;">🔬</div>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:1rem; position:relative; z-index:2;">
+                    <div>
+                        <h4 style="margin:0 0 0.25rem 0; color:#4ade80; font-size:1.3rem;">${r.product}</h4>
+                        <span style="color:var(--text); font-weight:500; font-size:0.95rem;">${r.name}</span>
+                    </div>
+                    <span style="font-size:0.75rem; padding:4px 10px; border-radius:12px; background:rgba(99,102,241,0.2); color:#a5b4fc; font-weight:600; text-transform:uppercase; letter-spacing:1px;">${r.type}</span>
                 </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem; font-size:0.85rem;">
-                    <div><strong style="color:var(--text-muted);">Equation:</strong> ${r.ratio} → ${r.product}</div>
-                    <div><strong style="color:var(--text-muted);">Bond Type:</strong> ${r.bond}</div>
-                    <div style="grid-column:1/-1;"><strong style="color:var(--text-muted);">Conditions:</strong> ${r.conditions}</div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; font-size:0.85rem; position:relative; z-index:2; background:rgba(0,0,0,0.3); padding:1rem; border-radius:8px;">
+                    <div><strong style="color:#a5b4fc; display:block; margin-bottom:4px;">Balanced Equation</strong> <span style="font-family:monospace; font-size:1rem;">${r.ratio} → ${r.product}</span></div>
+                    <div><strong style="color:#a5b4fc; display:block; margin-bottom:4px;">Primary Bond Type</strong> <span>${r.bond}</span></div>
+                    <div style="grid-column:1/-1;"><strong style="color:#a5b4fc; display:block; margin-bottom:4px;">Required Conditions</strong> <span>${r.conditions}</span></div>
                 </div>
             </div>
         `).join('');
@@ -1949,15 +2062,9 @@ showDetails = function(id) {
         `;
     };
 
-    // Inject Combine & Compare buttons
+    // Inject Compare button
     const modeToggles = document.querySelector('.mode-toggles');
     if (modeToggles) {
-        const combineBtn = document.createElement('button');
-        combineBtn.className = 'btn btn-secondary btn-sm';
-        combineBtn.textContent = '⚗️ Combine Elements';
-        combineBtn.onclick = openCombineLab;
-        modeToggles.appendChild(combineBtn);
-        
         const compareBtn = document.createElement('button');
         compareBtn.className = 'btn btn-secondary btn-sm';
         compareBtn.textContent = '⚖️ Compare';
@@ -1973,6 +2080,259 @@ showDetails = function(id) {
         legend.style.cssText = 'display:flex; gap:1rem; font-size:0.8rem; margin-top:0.5rem; justify-content:center;';
         phaseControls.appendChild(legend);
         updatePhaseLegend(298);
+    }
+    
+    // ═══════════════════════════════════════════════════
+    // NEW UI TABS & ALCHEMY LAB LOGIC
+    // ═══════════════════════════════════════════════════
+    document.getElementById('tabInfo')?.addEventListener('click', (e) => {
+        document.getElementById('tabInfo').classList.add('active');
+        document.getElementById('tab3D').classList.remove('active');
+        document.getElementById('infoView').classList.remove('hidden');
+        document.getElementById('modelView').classList.add('hidden');
+    });
+
+    document.getElementById('tab3D')?.addEventListener('click', (e) => {
+        document.getElementById('tab3D').classList.add('active');
+        document.getElementById('tabInfo').classList.remove('active');
+        document.getElementById('modelView').classList.remove('hidden');
+        document.getElementById('infoView').classList.add('hidden');
+        
+        // Render 3D model now
+        const numTxt = document.querySelector('.detail-num')?.textContent;
+        if(numTxt) {
+            const el = elements.find(x => x.n === parseInt(numTxt));
+            if(el) draw3DAtomicModel(el);
+        }
+    });
+    
+    // Alchemy Lab
+    window.isAlchemyLabOpen = false;
+    let alchemySelection = [];
+    
+    document.getElementById('openLabBtn')?.addEventListener('click', () => {
+        const lab = document.getElementById('alchemyLab');
+        lab.style.transform = 'translateY(0)';
+        document.getElementById('openLabBtn').style.display = 'none';
+        window.isAlchemyLabOpen = true;
+    });
+    
+    document.getElementById('toggleLabBtn')?.addEventListener('click', () => {
+        document.getElementById('alchemyLab').style.transform = 'translateY(100%)';
+        document.getElementById('openLabBtn').style.display = 'block';
+        window.isAlchemyLabOpen = false;
+    });
+    
+    document.getElementById('clearLabBtn')?.addEventListener('click', () => {
+        alchemySelection = [];
+        renderAlchemyDropzone();
+        document.getElementById('alchemyResult').style.display = 'none';
+    });
+    
+    window.addToAlchemy = function(id) {
+        if(alchemySelection.length >= 6) {
+            alert("Maximum 6 elements can be combined at once.");
+            return;
+        }
+        const el = elements.find(x => x.n === id);
+        if(el) {
+            alchemySelection.push(el);
+            renderAlchemyDropzone();
+            // Flash the dropzone border
+            const dz = document.getElementById('alchemyDropzone');
+            dz.style.boxShadow = 'inset 0 0 20px var(--accent)';
+            setTimeout(() => dz.style.boxShadow = 'none', 300);
+        }
+    };
+    
+    function renderAlchemyDropzone() {
+        const dz = document.getElementById('alchemyDropzone');
+        if(alchemySelection.length === 0) {
+            dz.innerHTML = '<div id="dropText" class="text-muted text-sm w-100 text-center" style="font-style:italic;">Click elements in the table to add them here, then click Combine!</div>';
+            return;
+        }
+        
+        let html = '';
+        alchemySelection.forEach((el, index) => {
+            const color = CATEGORIES[el.c] ? CATEGORIES[el.c].color : 'var(--border)';
+            html += `
+            <div style="position:relative; width:60px; height:60px; border-radius:8px; border:2px solid ${color}; background:rgba(0,0,0,0.5); display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0;">
+                <span style="font-size:0.6rem; color:var(--text-muted); position:absolute; top:2px; left:4px;">${el.n}</span>
+                <span style="font-weight:bold; font-size:1.2rem; color:${color};">${el.s}</span>
+                <button onclick="removeFromAlchemy(${index})" style="position:absolute; top:-8px; right:-8px; background:var(--danger); color:#fff; border:none; border-radius:50%; width:20px; height:20px; font-size:0.7rem; cursor:pointer; display:flex; align-items:center; justify-content:center;">×</button>
+            </div>
+            `;
+            if(index < alchemySelection.length - 1) {
+                html += `<span style="color:var(--accent); font-weight:bold; font-size:1.5rem;">+</span>`;
+            }
+        });
+        dz.innerHTML = html;
+    }
+    
+    window.removeFromAlchemy = function(index) {
+        alchemySelection.splice(index, 1);
+        renderAlchemyDropzone();
+    };
+    
+    document.getElementById('combineBtn')?.addEventListener('click', () => {
+        if(alchemySelection.length === 0) return;
+        
+        const nums = alchemySelection.map(e => e.n).sort((a,b)=>a-b);
+        const results = findReactions(nums);
+        
+        const resultPanel = document.getElementById('alchemyResult');
+        const title = document.getElementById('resultTitle');
+        const desc = document.getElementById('resultDesc');
+        const container3d = document.getElementById('result3DContainer');
+        
+        resultPanel.style.display = 'flex';
+        container3d.innerHTML = '';
+        
+        if (results.length > 0) {
+            const r = results[0];
+            title.textContent = "Synthesized: " + r.product;
+            title.style.color = 'var(--neon-green)';
+            desc.innerHTML = `<strong>${r.name}</strong><br>Type: ${r.type}<br>Equation: <span style="font-family:monospace;">${r.ratio} → ${r.product}</span>`;
+            
+            // Draw 3D molecule based on reaction!
+            draw3DMolecule(r.product, container3d);
+        } else {
+            title.textContent = "Reaction Failed";
+            title.style.color = 'var(--danger)';
+            desc.innerHTML = "No stable compound forms from these elements directly under normal conditions.";
+            // Draw explosion or dust
+            draw3DFailedReaction(container3d);
+        }
+    });
+    
+    document.getElementById('closeResultBtn')?.addEventListener('click', () => {
+        document.getElementById('alchemyResult').style.display = 'none';
+        if(window.currentMolModel) {
+            cancelAnimationFrame(window.currentMolModel.req);
+            window.currentMolModel.renderer.dispose();
+            window.currentMolModel = null;
+        }
+    });
+
+    function draw3DMolecule(formula, container) {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, w/h, 0.1, 1000);
+        camera.position.z = 40;
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+        
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+        
+        const molGroup = new THREE.Group();
+        scene.add(molGroup);
+        
+        // Simple heuristic for molecular geometry based on formula
+        // NaCl -> linear
+        // H2O -> bent
+        // CO2 -> linear
+        // CH4 -> tetrahedral
+        
+        const atomGeo = new THREE.SphereGeometry(1, 32, 32);
+        const bondGeo = new THREE.CylinderGeometry(0.2, 0.2, 1, 8);
+        const matC = new THREE.MeshPhysicalMaterial({color:0x222222, metalness:0.1, roughness:0.5}); // Carbon
+        const matO = new THREE.MeshPhysicalMaterial({color:0xff0000, metalness:0.1, roughness:0.5}); // Oxygen
+        const matH = new THREE.MeshPhysicalMaterial({color:0xffffff, metalness:0.1, roughness:0.5}); // Hydrogen
+        const matNa = new THREE.MeshPhysicalMaterial({color:0xaa55ff, metalness:0.5, roughness:0.3}); // Sodium
+        const matCl = new THREE.MeshPhysicalMaterial({color:0x00ff00, metalness:0.1, roughness:0.5}); // Chlorine
+        const bondMat = new THREE.MeshPhysicalMaterial({color:0xaaaaaa, metalness:0.5, roughness:0.2});
+        
+        function addAtom(mat, x, y, z, r=1) {
+            const mesh = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 32), mat);
+            mesh.position.set(x, y, z);
+            molGroup.add(mesh);
+            return mesh;
+        }
+        
+        function addBond(p1, p2) {
+            const dist = p1.distanceTo(p2);
+            const mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, dist, 8), bondMat);
+            mesh.position.copy(p1).lerp(p2, 0.5);
+            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), p2.clone().sub(p1).normalize());
+            molGroup.add(mesh);
+        }
+
+        if(formula === "H2O") {
+            const o = addAtom(matO, 0, 0, 0, 1.5);
+            const h1 = addAtom(matH, -2, -1.5, 0, 0.8);
+            const h2 = addAtom(matH, 2, -1.5, 0, 0.8);
+            addBond(o.position, h1.position);
+            addBond(o.position, h2.position);
+        } else if(formula === "CO2") {
+            const c = addAtom(matC, 0, 0, 0, 1.2);
+            const o1 = addAtom(matO, -3, 0, 0, 1.5);
+            const o2 = addAtom(matO, 3, 0, 0, 1.5);
+            addBond(c.position, o1.position);
+            addBond(c.position, o2.position);
+        } else if(formula === "NaCl") {
+            const na = addAtom(matNa, -2, 0, 0, 1.4);
+            const cl = addAtom(matCl, 2, 0, 0, 1.8);
+            addBond(na.position, cl.position);
+        } else {
+            // Generic cluster for unknown combinations
+            const matGen = new THREE.MeshPhysicalMaterial({color:0x00aaff, metalness:0.3, roughness:0.2, transmission:0.5, transparent:true});
+            const c = addAtom(matGen, 0,0,0, 2);
+            for(let i=0; i<3; i++) {
+                const a = addAtom(matGen, (Math.random()-0.5)*6, (Math.random()-0.5)*6, (Math.random()-0.5)*6, 1);
+                addBond(c.position, a.position);
+            }
+        }
+        
+        const render = () => {
+            const req = requestAnimationFrame(render);
+            molGroup.rotation.y += 0.01;
+            controls.update();
+            renderer.render(scene, camera);
+            window.currentMolModel = { req, renderer };
+        };
+        render();
+    }
+    
+    function draw3DFailedReaction(container) {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, w/h, 0.1, 1000);
+        camera.position.z = 40;
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+        
+        const geo = new THREE.BufferGeometry();
+        const count = 500;
+        const pos = new Float32Array(count * 3);
+        for(let i=0; i<count*3; i++) pos[i] = (Math.random()-0.5)*20;
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const mat = new THREE.PointsMaterial({color: 0x888888, size: 0.5, transparent:true, opacity:0.6});
+        const points = new THREE.Points(geo, mat);
+        scene.add(points);
+        
+        const render = () => {
+            const req = requestAnimationFrame(render);
+            points.rotation.y += 0.02;
+            points.rotation.x += 0.01;
+            renderer.render(scene, camera);
+            window.currentMolModel = { req, renderer };
+        };
+        render();
     }
 
 })();
